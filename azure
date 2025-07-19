@@ -1,0 +1,71 @@
+import requests
+from pprint import pprint
+
+# Настройки Azure DevOps
+ORGANIZATION = "your-organization"
+PROJECT = "your-project"
+WIKI_IDENTIFIER = "your-project.wiki"  # или ID вики
+PAT = "your-personal-access-token"  # Токен с правами чтения вики
+
+# Формируем базовый URL
+BASE_URL = f"https://dev.azure.com/{ORGANIZATION}/{PROJECT}/_apis/wiki/wikis/{WIKI_IDENTIFIER}"
+
+# Заголовки для авторизации
+headers = {
+    "Authorization": f"Basic {PAT}",
+    "Content-Type": "application/json"
+}
+
+def get_wiki_pages(path="/", recursion_level="Full"):
+    """Получает список страниц вики (с вложенностью)"""
+    params = {
+        "path": path,
+        "recursionLevel": recursion_level,
+        "includeContent": False,
+        "api-version": "7.1-preview.1"
+    }
+    response = requests.get(
+        f"{BASE_URL}/pages",
+        headers=headers,
+        params=params
+    )
+    return response.json().get("value", [])
+
+def get_page_content(path):
+    """Получает Markdown-контент страницы"""
+    params = {
+        "path": path,
+        "includeContent": True,
+        "api-version": "7.1-preview.1"
+    }
+    response = requests.get(
+        f"{BASE_URL}/pages",
+        headers=headers,
+        params=params
+    )
+    return response.json().get("content", "")
+
+def build_wiki_tree(parent_path="/"):
+    """Рекурсивно строит дерево страниц вики"""
+    pages = get_wiki_pages(parent_path)
+    wiki_tree = {}
+
+    for page in pages:
+        path = page["path"]
+        if path == parent_path:
+            continue  # Пропускаем текущий родительский путь
+        
+        # Если у страницы есть дети, рекурсивно обрабатываем их
+        child_pages = [p for p in pages if p["path"].startswith(f"{path}/")]
+        if child_pages:
+            wiki_tree[path] = build_wiki_tree(path)
+        else:
+            wiki_tree[path] = get_page_content(path)
+    
+    return wiki_tree
+
+# Собираем всё дерево вики
+wiki_structure = build_wiki_tree()
+
+# Выводим результат
+pprint(wiki_structure)
