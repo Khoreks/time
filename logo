@@ -1,0 +1,68 @@
+import cv2, numpy as np
+from pdf2image import convert_from_path
+from skimage.metrics import structural_similarity as ssim
+from imutils.object_detection import non_max_suppression
+
+# === 1. PDF → FullHD картинка ===
+pdf_path = "file.pdf"
+page = convert_from_path(pdf_path, dpi=200, first_page=1, last_page=1)[0]
+page.save("page.png", "PNG")
+img = cv2.imread("page.png")
+img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+# === 2. Список эталонных логотипов ===
+logos = []
+for l in ["logo1.png", "logo2.png", "logo3.png", "logo4.png", "logo5.png"]:
+    ref = cv2.imread(l, cv2.IMREAD_UNCHANGED)
+    ref = cv2.resize(ref, (128, 128))
+    logos.append(cv2.cvtColor(ref, cv2.COLOR_BGRA2BGR))
+
+# === 3. Поиск методом template matching (OpenCV) ===
+def match_all_templates(scene, templates, threshold=0.7):
+    h, w = scene.shape[:2]
+    boxes = []
+    for tpl in templates:
+        for scale in np.linspace(0.5, 1.5, 5)[::-1]:
+            resized = cv2.resize(tpl, (0,0), fx=scale, fy=scale)
+            if resized.shape[0] > h or resized.shape[1] > w:
+                continue
+            corr = cv2.matchTemplate(scene, resized, cv2.TM_CCOEFF_NORMED)
+            loc = np.where(corr >= threshold)
+            for pt in zip(*loc[::-1]):
+                boxes.append((pt[0], pt[1],
+                              pt[0]+resized.shape[1],
+                              pt[1]+resized.shape[0]))
+    # Убираем дубликаты
+    boxes = non_max_suppression(np.array(boxes))
+    return boxes
+
+gray_scene = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+gray_logos = [cv2.cvtColor(l, cv2.COLOR_BGR2GRAY) for l in logos]
+
+boxes = match_all_templates(gray_scene, gray_logos, threshold=0.75)
+
+# === 4. Дополнительная проверка SSIM (фильтр ложных срабатываний) ===
+def ssim_filter(scene, templates, boxes, min_ssim=0.85):
+    keep = []
+    for (x1, y1, x2, y2) in boxes:
+        roi = scene[y1:y2, x1:x2]
+        best = 0
+        for tpl in templates:
+            tpl = cv2.resize(tpl, (roi.shape[1], roi.shape[0]))
+            val = ssim(roi, tpl)
+            best = max(best, val)
+        if best >= min_ssim:
+            keep.append((x1, y1, x2, y2, best))
+    return keep
+
+final = ssim_filter(gray_scene, gray_logos, boxes, min_ssim=0.80)
+
+# === 5. Результат ===
+for x1,y1,x2,y2,score in final:
+    cv2.rectangle(img, (x1,y1), (x2,y2), (0,255,0), 2)
+    print(f"Логотип найден: ({x1},{y1})-({x2},{y2}), score={score:.2f}")
+
+if not final:
+    print("Логотип не обнаружен.")
+
+cv2.imwrite("result.png", img)
