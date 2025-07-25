@@ -1,0 +1,33 @@
+from PIL import Image, ImageEnhance, ImageFilter
+import cv2
+import numpy as np
+
+def preprocess_for_ocr(image_path, output_path):
+    # 1. Загрузка изображения (PIL)
+    img = Image.open(image_path)
+    
+    # 2. Конвертация в grayscale (упрощает анализ текста)
+    img = img.convert("L")  # Режим 'L' = 8-битный grayscale
+    
+    # 3. Увеличение резкости (Unsharp Mask)
+    img = img.filter(ImageFilter.UnsharpMask(radius=2, percent=150, threshold=3))
+    
+    # 4. Автоконтраст (растягиваем гистограмму)
+    img = ImageOps.autocontrast(img, cutoff=2)
+    
+    # 5. Бинаризация (адаптивный порог)
+    img_np = np.array(img)
+    img_bin = cv2.adaptiveThreshold(
+        img_np, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY, 11, 2
+    )
+    
+    # 6. Удаление мелкого шума (морфология)
+    kernel = np.ones((1, 1), np.uint8)
+    img_clean = cv2.morphologyEx(img_bin, cv2.MORPH_OPEN, kernel)
+    
+    # 7. Сохранение результата
+    Image.fromarray(img_clean).save(output_path)
+
+# Пример вызова
+preprocess_for_ocr("document.jpg", "preprocessed_document.jpg")
