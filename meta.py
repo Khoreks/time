@@ -182,3 +182,131 @@ class MetaClassManager:
         self.meta_df.loc[inactive_mask, ["active", "last_update"]] = [False, datetime.now()]
 
         return self.meta_df
+
+
+
+from __future__ import annotations
+import pandas as pd
+import uuid
+from typing import List
+
+
+class MetaClassManager:
+    """
+    Шаг 1. Инициализация метаклассов по активным комбинациям каталога.
+
+    Вход: DataFrame catalog с колонками:
+      ['group_title','service_title','service_id','comp_title','comp_id',
+       'view_title','view_id','type_title','creation_date','last_modified_date','available']
+
+    Результат: self.meta_df с колонками:
+      ['uuid', 'title', 'nested_classes', 'available']
+
+    Определения:
+      - class_key = f"{service_id}|{comp_id}|{view_id}"
+      - title      = f"{service_title}|{comp_title}|{view_title}"
+      - nested_classes: List[str] из class_key, сгруппированных по title
+      - available: True для созданных на шаге 1 (инициализация только по активным)
+
+    Деталь: UUID детерминирован по title через uuid5, чтобы переинициализация
+            давала те же meta-id при неизменном названии.
+    """
+
+    META_COLUMNS = ["uuid", "title", "nested_classes", "available"]
+
+    def __init__(self, meta_df: pd.DataFrame | None = None) -> None:
+        if meta_df is None:
+            self.meta_df = pd.DataFrame(columns=self.META_COLUMNS)
+        else:
+            # нормализуем порядок и наличие колонок
+            for c in self.META_COLUMNS:
+                if c not in meta_df.columns:
+                    meta_df[c] = pd.NA
+            self.meta_df = meta_df[self.META_COLUMNS].copy()
+
+    @staticmethod
+    def _class_key(row: pd.Series) -> str:
+        return f"{row['service_id']}|{row['comp_id']}|{row['view_id']}"
+
+    @staticmethod
+    def _title(row: pd.Series) -> str:
+        return f"{row['service_title']}|{row['comp_title']}|{row['view_title']}"
+
+    @staticmethod
+    def _uuid_for_title(title: str) -> str:
+        # детерминированный UUID по названию метакласса
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"meta:{title}"))
+
+    def init_active(self, catalog: pd.DataFrame) -> pd.DataFrame:
+        """Создать метаклассы для всех активных комбинаций каталога.
+
+        Возвращает обновлённый self.meta_df.
+        """
+        required_cols = {
+            'service_title', 'comp_title', 'view_title',
+            'service_id', 'comp_id', 'view_id', 'available'
+        }
+        missing = required_cols - set(catalog.columns)
+        if missing:
+            raise ValueError(f"Отсутствуют колонки в catalog: {sorted(missing)}")
+
+        # фильтруем только активные строки
+        active = catalog[catalog['available'] == True].copy()  # noqa: E712
+        if active.empty:
+            # очистка и возврат пустой таблицы в корректном формате
+            self.meta_df = pd.DataFrame(columns=self.META_COLUMNS)
+            return self.meta_df
+
+        # подготовим вспомогательные поля
+        active['class_key'] = active.apply(self._class_key, axis=1)
+        active['title'] = active.apply(self._title, axis=1)
+
+        # группируем по названию метакласса
+        grouped = (
+            active.groupby('title')['class_key']
+            .apply(list)
+            .reset_index(name='nested_classes')
+        )
+
+        # формируем мета-таблицу
+        meta = pd.DataFrame({
+            'uuid': grouped['title'].apply(self._uuid_for_title),
+            'title': grouped['title'],
+            'nested_classes': grouped['nested_classes'],
+            'available': True,
+        })
+
+        # сохраняем как текущее состояние
+        self.meta_df = meta[self.META_COLUMNS].copy()
+        return self.meta_df
+
+
+# --------------------------
+# Пример использования (док-тест)
+# --------------------------
+if __name__ == "__main__":
+    data = [
+        {
+            'group_title': 'Comm', 'service_title': 'Skype', 'service_id': 1,
+            'comp_title': 'Base', 'comp_id': 10, 'view_title': 'Default', 'view_id': 100,
+            'type_title': 'app', 'creation_date': '2025-01-01', 'last_modified_date': '2025-01-02',
+            'available': True,
+        },
+        {
+            'group_title': 'Comm', 'service_title': 'Skype', 'service_id': 13,
+            'comp_title': 'Base', 'comp_id': 10, 'view_title': 'Default', 'view_id': 100,
+            'type_title': 'app', 'creation_date': '2025-01-10', 'last_modified_date': '2025-01-11',
+            'available': True,
+        },
+        {
+            'group_title': 'Comm', 'service_title': 'Skype для конференций', 'service_id': 14,
+            'comp_title': 'Base', 'comp_id': 10, 'view_title': 'Default', 'view_id': 100,
+            'type_title': 'app', 'creation_date': '2025-01-20', 'last_modified_date': '2025-01-21',
+            'available': False,
+        },
+    ]
+    catalog_df = pd.DataFrame(data)
+
+    mgr = MetaClassManager()
+    meta_df = mgr.init_active(catalog_df)
+    print(meta_df)
