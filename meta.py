@@ -310,3 +310,143 @@ if __name__ == "__main__":
     mgr = MetaClassManager()
     meta_df = mgr.init_active(catalog_df)
     print(meta_df)
+
+
+
+
+from __future__ import annotations
+import pandas as pd
+import uuid
+from typing import List
+
+
+class MetaClassManager:
+    """
+    Шаги реализации:
+    1. Инициализация метаклассов по активным комбинациям каталога.
+    2. Обработка неактивных комбинаций: если неактивная комбинация отсутствует
+       в nested_classes, пытаемся найти метакласс по title.
+    """
+
+    META_COLUMNS = ["uuid", "title", "nested_classes", "available"]
+
+    def __init__(self, meta_df: pd.DataFrame | None = None) -> None:
+        if meta_df is None:
+            self.meta_df = pd.DataFrame(columns=self.META_COLUMNS)
+        else:
+            for c in self.META_COLUMNS:
+                if c not in meta_df.columns:
+                    meta_df[c] = pd.NA
+            self.meta_df = meta_df[self.META_COLUMNS].copy()
+
+    @staticmethod
+    def _class_key(row: pd.Series) -> str:
+        return f"{row['service_id']}|{row['comp_id']}|{row['view_id']}"
+
+    @staticmethod
+    def _title(row: pd.Series) -> str:
+        return f"{row['service_title']}|{row['comp_title']}|{row['view_title']}"
+
+    @staticmethod
+    def _uuid_for_title(title: str) -> str:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, f"meta:{title}"))
+
+    def init_active(self, catalog: pd.DataFrame) -> pd.DataFrame:
+        required_cols = {
+            'service_title', 'comp_title', 'view_title',
+            'service_id', 'comp_id', 'view_id', 'available'
+        }
+        missing = required_cols - set(catalog.columns)
+        if missing:
+            raise ValueError(f"Отсутствуют колонки в catalog: {sorted(missing)}")
+
+        active = catalog[catalog['available'] == True].copy()  # noqa: E712
+        if active.empty:
+            self.meta_df = pd.DataFrame(columns=self.META_COLUMNS)
+            return self.meta_df
+
+        active['class_key'] = active.apply(self._class_key, axis=1)
+        active['title'] = active.apply(self._title, axis=1)
+
+        grouped = (
+            active.groupby('title')['class_key']
+            .apply(list)
+            .reset_index(name='nested_classes')
+        )
+
+        meta = pd.DataFrame({
+            'uuid': grouped['title'].apply(self._uuid_for_title),
+            'title': grouped['title'],
+            'nested_classes': grouped['nested_classes'],
+            'available': True,
+        })
+
+        self.meta_df = meta[self.META_COLUMNS].copy()
+        return self.meta_df
+
+    def handle_inactive(self, catalog: pd.DataFrame) -> pd.DataFrame:
+        """
+        Обработка неактивных комбинаций.
+        Если комбинация отсутствует в nested_classes, но title совпадает с
+        существующим метаклассом, то добавляем комбинацию туда.
+        """
+        inactive = catalog[catalog['available'] == False].copy()  # noqa: E712
+        if inactive.empty:
+            return self.meta_df
+
+        inactive['class_key'] = inactive.apply(self._class_key, axis=1)
+        inactive['title'] = inactive.apply(self._title, axis=1)
+
+        for _, row in inactive.iterrows():
+            title = row['title']
+            class_key = row['class_key']
+
+            mask = self.meta_df['title'] == title
+            if mask.any():
+                # добавляем class_key, если его там ещё нет
+                nested = self.meta_df.loc[mask, 'nested_classes'].iloc[0]
+                if class_key not in nested:
+                    new_nested = nested + [class_key]
+                    self.meta_df.loc[mask, 'nested_classes'] = [new_nested]
+            else:
+                # если такого title нет вообще — создаём новый метакласс (неактивный)
+                self.meta_df.loc[len(self.meta_df)] = [
+                    self._uuid_for_title(title),
+                    title,
+                    [class_key],
+                    False
+                ]
+
+        return self.meta_df
+
+
+# --------------------------
+# Пример использования (док-тест)
+# --------------------------
+if __name__ == "__main__":
+    data = [
+        {
+            'group_title': 'Comm', 'service_title': 'Skype', 'service_id': 1,
+            'comp_title': 'Base', 'comp_id': 10, 'view_title': 'Default', 'view_id': 100,
+            'type_title': 'app', 'creation_date': '2025-01-01', 'last_modified_date': '2025-01-02',
+            'available': True,
+        },
+        {
+            'group_title': 'Comm', 'service_title': 'Skype', 'service_id': 13,
+            'comp_title': 'Base', 'comp_id': 10, 'view_title': 'Default', 'view_id': 100,
+            'type_title': 'app', 'creation_date': '2025-01-10', 'last_modified_date': '2025-01-11',
+            'available': False,
+        },
+        {
+            'group_title': 'Comm', 'service_title': 'Skype для конференций', 'service_id': 14,
+            'comp_title': 'Base', 'comp_id': 10, 'view_title': 'Default', 'view_id': 100,
+            'type_title': 'app', 'creation_date': '2025-01-20', 'last_modified_date': '2025-01-21',
+            'available': False,
+        },
+    ]
+    catalog_df = pd.DataFrame(data)
+
+    mgr = MetaClassManager()
+    mgr.init_active(catalog_df)
+    meta_df = mgr.handle_inactive(catalog_df)
+    print(meta_df)
