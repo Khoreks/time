@@ -450,3 +450,24 @@ if __name__ == "__main__":
     mgr.init_active(catalog_df)
     meta_df = mgr.handle_inactive(catalog_df)
     print(meta_df)
+
+
+for _, row in inactive.iterrows():
+    title = row['title']
+    class_key = row['class_key']
+
+    mask = self.meta_df['title'] == title
+    if mask.any():
+        idx = self.meta_df.index[mask][0]  # индекс совпадения
+        nested = self.meta_df.at[idx, 'nested_classes']
+        if class_key not in nested:
+            new_nested = nested + [class_key]
+            self.meta_df.at[idx, 'nested_classes'] = new_nested
+    else:
+        # если такого title нет вообще — создаём новый метакласс (неактивный)
+        self.meta_df.loc[len(self.meta_df)] = [
+            self._uuid_for_title(title),
+            title,
+            [class_key],
+            False
+        ]
