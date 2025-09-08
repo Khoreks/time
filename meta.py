@@ -131,3 +131,54 @@ if __name__ == "__main__":
     meta_info = manager.get_meta_class_info()
     print("\nMeta classes information:")
     print(meta_info)
+
+
+
+
+import pandas as pd
+import uuid
+from datetime import datetime
+
+class MetaClassManager:
+    def __init__(self, meta_df: pd.DataFrame | None = None):
+        if meta_df is None:
+            self.meta_df = pd.DataFrame(columns=[
+                "meta_class_id", "class_key", "service_title",
+                "comp_title", "view_title", "active", "last_update"
+            ])
+        else:
+            self.meta_df = meta_df
+
+    def _make_class_key(self, row):
+        return f"{row['service_id']}|{row['comp_id']}|{row['view_id']}"
+
+    def update_from_catalog(self, catalog: pd.DataFrame):
+        catalog = catalog.copy()
+        catalog["class_key"] = catalog.apply(self._make_class_key, axis=1)
+
+        for _, row in catalog.iterrows():
+            mask = (
+                (self.meta_df["service_title"] == row["service_title"]) &
+                (self.meta_df["comp_title"] == row["comp_title"]) &
+                (self.meta_df["view_title"] == row["view_title"])
+            )
+
+            if mask.any():
+                # обновляем существующий метакласс
+                self.meta_df.loc[mask, ["class_key", "active", "last_update"]] = [
+                    row["class_key"], row["available"], datetime.now()
+                ]
+            else:
+                # создаём новый метакласс
+                self.meta_df.loc[len(self.meta_df)] = [
+                    str(uuid.uuid4()), row["class_key"],
+                    row["service_title"], row["comp_title"], row["view_title"],
+                    row["available"], datetime.now()
+                ]
+
+        # пометить неактивные
+        current_keys = set(catalog["class_key"])
+        inactive_mask = ~self.meta_df["class_key"].isin(current_keys)
+        self.meta_df.loc[inactive_mask, ["active", "last_update"]] = [False, datetime.now()]
+
+        return self.meta_df
