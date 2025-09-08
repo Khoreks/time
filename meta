@@ -1,0 +1,133 @@
+import pandas as pd
+from typing import Dict, List, Optional, Set, Tuple
+from collections import defaultdict
+
+class MetaClassManager:
+    def __init__(self):
+        self.next_meta_id = 1
+        self.meta_classes = {}  # meta_class_id -> MetaClass
+        self.current_mapping = {}  # (group, service, comp, view) -> meta_class_id
+        self.clf_to_meta = {}  # clf_id -> meta_class_id
+
+    class MetaClass:
+        __slots__ = ['meta_id', 'current_clf', 'history_clfs', 'attributes']
+        def __init__(self, meta_id: int, clf_id: int, attributes: Tuple):
+            self.meta_id = meta_id
+            self.current_clf = clf_id
+            self.history_clfs = [clf_id]
+            self.attributes = attributes  # (group, service, comp, view)
+
+    def initialize_from_catalog(self, df: pd.DataFrame) -> None:
+        """Инициализация метаклассов из исходного каталога"""
+        grouped = df.groupby(['group_title', 'service_title', 'comp_title', 'view_title'])
+        
+        for attributes, group in grouped:
+            clf_ids = group['clf_id'].unique()
+            if len(clf_ids) > 1:
+                raise ValueError(f"Multiple clf_id found for {attributes}")
+            
+            clf_id = clf_ids[0]
+            meta_id = self.next_meta_id
+            self.next_meta_id += 1
+            
+            meta_class = self.MetaClass(meta_id, clf_id, attributes)
+            
+            self.meta_classes[meta_id] = meta_class
+            self.current_mapping[attributes] = meta_id
+            self.clf_to_meta[clf_id] = meta_id
+
+    def update_from_new_catalog(self, new_df: pd.DataFrame) -> pd.DataFrame:
+        """Обновление метаклассов на основе нового каталога"""
+        new_grouped = new_df.groupby(['group_title', 'service_title', 'comp_title', 'view_title'])
+        new_attributes_map = {attrs: group['clf_id'].iloc[0] for attrs, group in new_grouped}
+
+        # Поиск изменений
+        changes = []
+        current_attrs = set(self.current_mapping.keys())
+        new_attrs = set(new_attributes_map.keys())
+
+        # Обработка удаленных и измененных классов
+        for attrs in current_attrs - new_attrs:
+            meta_id = self.current_mapping[attrs]
+            self.meta_classes[meta_id].current_clf = None
+
+        # Обработка новых и измененных классов
+        for attrs in new_attrs:
+            new_clf = new_attributes_map[attrs]
+            
+            if attrs in self.current_mapping:
+                meta_id = self.current_mapping[attrs]
+                meta_class = self.meta_classes[meta_id]
+                
+                if meta_class.current_clf != new_clf:
+                    meta_class.history_clfs.append(new_clf)
+                    meta_class.current_clf = new_clf
+                    self.clf_to_meta[new_clf] = meta_id
+                    changes.append(('replaced', meta_id, attrs))
+            else:
+                # Новый метакласс
+                meta_id = self.next_meta_id
+                self.next_meta_id += 1
+                
+                meta_class = self.MetaClass(meta_id, new_clf, attrs)
+                self.meta_classes[meta_id] = meta_class
+                self.current_mapping[attrs] = meta_id
+                self.clf_to_meta[new_clf] = meta_id
+                changes.append(('created', meta_id, attrs))
+
+        return pd.DataFrame(changes, columns=['change_type', 'meta_id', 'attributes'])
+
+    def get_meta_class_info(self) -> pd.DataFrame:
+        """Получение информации о метаклассах в виде DataFrame"""
+        rows = []
+        for meta in self.meta_classes.values():
+            rows.append({
+                'meta_class_id': meta.meta_id,
+                'current_class_id': meta.current_clf,
+                'history_class_ids': meta.history_clfs,
+                'group_title': meta.attributes[0],
+                'service_title': meta.attributes[1],
+                'comp_title': meta.attributes[2],
+                'view_title': meta.attributes[3]
+            })
+        return pd.DataFrame(rows)
+
+    def get_meta_class_by_clf(self, clf_id: int) -> Optional[int]:
+        """Получение meta_class_id по clf_id"""
+        return self.clf_to_meta.get(clf_id)
+
+# Пример использования
+if __name__ == "__main__":
+    # Создание исходного каталога
+    initial_data = {
+        'group_title': ['G1', 'G1', 'G2'],
+        'service_title': ['S1', 'S1', 'S2'],
+        'comp_title': ['C1', 'C1', 'C2'],
+        'view_title': ['V1', 'V1', 'V2'],
+        'clf_id': [123, 123, 456]
+    }
+    initial_df = pd.DataFrame(initial_data)
+
+    # Инициализация менеджера
+    manager = MetaClassManager()
+    manager.initialize_from_catalog(initial_df)
+
+    # Создание нового каталога с изменениями
+    new_data = {
+        'group_title': ['G1', 'G2', 'G3'],
+        'service_title': ['S1', 'S2', 'S3'],
+        'comp_title': ['C1', 'C2', 'C3'],
+        'view_title': ['V1', 'V2', 'V3'],
+        'clf_id': [321, 456, 789]
+    }
+    new_df = pd.DataFrame(new_data)
+
+    # Обновление метаклассов
+    changes = manager.update_from_new_catalog(new_df)
+    print("Changes detected:")
+    print(changes)
+
+    # Получение текущего состояния метаклассов
+    meta_info = manager.get_meta_class_info()
+    print("\nMeta classes information:")
+    print(meta_info)
