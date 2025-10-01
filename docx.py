@@ -17,8 +17,18 @@ def load_file(file_content: BytesIO) -> Document:
 
 def extract_content(doc: Document) -> str:
     full_text = []
-    for para in doc.paragraphs:
-        full_text.append(para.text)
+
+    # Обходим все элементы в документе в порядке их следования
+    for element in doc.element.body:
+        if element.tag.endswith('p'):  # параграф
+            para = docx.text.paragraph.Paragraph(element, doc)
+            full_text.append(para.text)
+        elif element.tag.endswith('tbl'):  # таблица
+            table = docx.table.Table(element, doc)
+            for row in table.rows:
+                for cell in row.cells:
+                    full_text.append(cell.text)
+
     return '\n'.join(full_text)
 
 def extract_images(doc: Document, file_content: BytesIO) -> list:
