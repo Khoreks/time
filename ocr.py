@@ -61,3 +61,16 @@ Your task is to analyze all provided images and synthesize a comprehensive, huma
    - Return ONLY the Markdown content.
    - Do not add introductions, apologies, or meta-comments (e.g., "Here is the manual:").
    - Start directly with `# Title` or the first heading.
+
+
+Доступные документы (в формате дерева каталогов):
+
+project/
+├── docs/
+│   ├── guide.md
+│   └── api.pdf
+├── research/
+│   ├── paper_v1.pdf
+│   └── notes/
+│       └── draft.md
+└── README.md
