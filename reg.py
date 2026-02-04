@@ -10,38 +10,39 @@ class ListItem:
 
 
 MARKER_PATTERNS = [
-    (r'^(\d+\.\d+[.)]\s*)', 'nested_numeric'),  # 2.1.
-    (r'^(\d+[.)]\s*)', 'numeric'),               # 1. или 1)
-    (r'^([а-яА-Яa-zA-Z][.)]\s*)', 'alpha'),      # а) или a.
-    (r'^([-•*●○]\s*)', 'bullet'),                # - * •
-    (r'^(»\s*)', 'bullet'),                       # »
+    r'^(\d+\.\d+[.)]\s*)',        # 2.1. или 2.1)
+    r'^(\d+[.)]\s*)',              # 1. или 1)
+    r'^([а-яА-Яa-zA-Z][.)]\s*)',   # а) или a.
+    r'^([-•*●○]\s*)',              # - * •
+    r'^(»\s*)',                     # »
 ]
 
 
-def extract_marker(text: str) -> tuple[str, str, str]:
-    """Возвращает (маркер, контент, тип маркера)."""
-    for pattern, marker_type in MARKER_PATTERNS:
+def extract_marker(text: str) -> tuple[str, str]:
+    for pattern in MARKER_PATTERNS:
         match = re.match(pattern, text)
         if match:
             marker = match.group(1)
             content = text[len(marker):].strip()
-            return marker.strip(), content, marker_type
-    return '', text, 'none'
+            return marker.strip(), content
+    return '', text
 
 
 def detect_level_from_marker(marker: str) -> int | None:
-    """Уровень из составного маркера (2.1 -> level 1)."""
+    """Определяет уровень по самому маркеру (например 2.1 = уровень 1)."""
+    # Маркер типа 2.1. или 3.2.1.
     match = re.match(r'^(\d+(?:\.\d+)+)', marker)
     if match:
         parts = match.group(1).split('.')
-        return len(parts) - 1
+        return len(parts) - 1  # 2.1 -> уровень 1, 2.1.3 -> уровень 2
     return None
 
 
 def parse_list(text: str) -> list[ListItem]:
     lines = text.strip().split('\n')
+    items = []
     
-    # Первый проход: собираем информацию
+    # Собираем информацию о всех строках
     parsed_lines = []
     for line in lines:
         if not line.strip():
@@ -49,78 +50,44 @@ def parse_list(text: str) -> list[ListItem]:
         
         indent = len(line) - len(line.lstrip())
         clean = line.strip()
-        marker, content, marker_type = extract_marker(clean)
+        marker, content = extract_marker(clean)
         
         parsed_lines.append({
             'indent': indent,
             'marker': marker,
             'content': content,
-            'marker_type': marker_type,
+            'has_marker': bool(marker)
         })
     
-    # Уникальные отступы -> уровни
+    # Определяем уникальные отступы для маппинга на уровни
     unique_indents = sorted(set(p['indent'] for p in parsed_lines))
     indent_to_level = {indent: i for i, indent in enumerate(unique_indents)}
     
-    # Второй проход: определяем уровни
-    items = []
-    marker_type_stack = []  # Стек типов маркеров для отслеживания вложенности
-    
+    # Строим элементы
     for i, p in enumerate(parsed_lines):
-        level = 0
-        
-        # Приоритет 1: составной маркер (2.1.)
+        # Приоритет 1: уровень из самого маркера (2.1. -> level 1)
         level_from_marker = detect_level_from_marker(p['marker'])
         if level_from_marker is not None:
             level = level_from_marker
-            
-        # Приоритет 2: отступ
+        
+        # Приоритет 2: уровень по отступу
         elif p['indent'] > 0:
             level = indent_to_level[p['indent']]
-            
-        # Приоритет 3: смена типа маркера = вложенность
-        elif p['marker_type'] != 'none':
-            # Ищем предыдущий элемент с маркером на уровне 0
-            prev_type = None
-            for j in range(i - 1, -1, -1):
-                if parsed_lines[j]['marker_type'] != 'none':
-                    prev_type = parsed_lines[j]['marker_type']
-                    prev_indent = parsed_lines[j]['indent']
-                    break
-            
-            if prev_type and prev_type != p['marker_type'] and p['indent'] == 0:
-                # Тип сменился: numeric -> bullet или bullet -> alpha и т.д.
-                # Проверяем — это вложенность или новый список?
-                
-                # Смотрим вперёд: если потом вернётся старый тип — это вложенность
-                returns_to_prev = False
-                for j in range(i + 1, len(parsed_lines)):
-                    if parsed_lines[j]['marker_type'] == prev_type and parsed_lines[j]['indent'] <= p['indent']:
-                        returns_to_prev = True
-                        break
-                    if parsed_lines[j]['marker_type'] not in (p['marker_type'], 'none'):
-                        break
-                
-                if returns_to_prev:
-                    level = 1  # Это вложенный список
-                else:
-                    level = 0  # Это просто новый список с другим маркером
-            else:
-                level = 0
-                
-        # Приоритет 4: без маркера
-        else:
-            # Проверяем, есть ли после дочерние элементы
+        
+        # Приоритет 3: без маркера + следующий с маркером = заголовок
+        elif not p['has_marker']:
+            # Проверяем, есть ли после этой строки пункты с маркерами/отступами
             has_children = False
             for j in range(i + 1, len(parsed_lines)):
-                if parsed_lines[j]['indent'] > p['indent'] or (
-                    parsed_lines[j]['marker_type'] != 'none' and 
-                    parsed_lines[j]['indent'] >= p['indent']
-                ):
+                if parsed_lines[j]['indent'] > p['indent'] or parsed_lines[j]['has_marker']:
                     has_children = True
                     break
-                if parsed_lines[j]['indent'] < p['indent']:
+                if parsed_lines[j]['indent'] <= p['indent'] and not parsed_lines[j]['has_marker']:
                     break
+            
+            level = 0  # Заголовок всегда level 0
+            
+        else:
             level = 0
         
         items.append(ListItem(
@@ -162,3 +129,29 @@ def format_list(text: str) -> str:
         lines.append(f"{indent}{number} {content}")
     
     return '\n'.join(lines)
+
+
+# === ТЕСТЫ ===
+test1 = """1. Определить цели проекта и собрать исходные требования.
+2. Разработать архитектуру решения:
+ 2.1. Выбрать технологический стек и инструменты.
+ 2.2. Спроектировать взаимодействие компонентов системы.
+3. Реализовать MVP и провести первичное тестирование."""
+
+test2 = """Разработать архитектуру решения:
+ - Выбрать технологический стек и инструменты.
+ - Спроектировать взаимодействие компонентов системы."""
+
+test3 = """* Определить цели проекта и собрать исходные требования.
+* Разработать архитектуру решения:
+ Выбрать технологический стек и инструменты.
+ Спроектировать взаимодействие компонентов системы.
+* Реализовать MVP и провести первичное тестирование."""
+
+for i, test in enumerate([test1, test2, test3], 1):
+    print(f"=== TEST {i} ===")
+    print("Вход:")
+    print(test)
+    print("\nВыход:")
+    print(format_list(test))
+    print("\n")
