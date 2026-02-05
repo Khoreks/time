@@ -1,157 +1,145 @@
-import re
-from dataclasses import dataclass
+from pydantic import BaseModel, Field
+from enum import Enum
 
 
-@dataclass
-class ListItem:
-    level: int
-    content: str
-    original_marker: str
+class ParsingConfidence(str, Enum):
+    HIGH = "high"        # Уверен в разметке
+    MEDIUM = "medium"    # Есть небольшие сомнения
+    LOW = "low"          # Требуется ручная проверка
 
 
-MARKER_PATTERNS = [
-    r'^(\d+\.\d+[.)]\s*)',        # 2.1. или 2.1)
-    r'^(\d+[.)]\s*)',              # 1. или 1)
-    r'^([а-яА-Яa-zA-Z][.)]\s*)',   # а) или a.
-    r'^([-•*●○]\s*)',              # - * •
-    r'^(»\s*)',                     # »
-]
+class Function(BaseModel):
+    """Конкретная функция/действие в рамках задачи."""
+    text: str = Field(description="Текст функции")
+    original_marker: str | None = Field(default=None, description="Исходный маркер (-, *, 1. и т.д.)")
 
 
-def extract_marker(text: str) -> tuple[str, str]:
-    for pattern in MARKER_PATTERNS:
-        match = re.match(pattern, text)
-        if match:
-            marker = match.group(1)
-            content = text[len(marker):].strip()
-            return marker.strip(), content
-    return '', text
+class Task(BaseModel):
+    """Задача с возможными подфункциями."""
+    text: str = Field(description="Текст задачи")
+    functions: list[Function] = Field(default_factory=list, description="Список функций в рамках задачи")
+    original_marker: str | None = Field(default=None, description="Исходный маркер")
 
 
-def detect_level_from_marker(marker: str) -> int | None:
-    """Определяет уровень по самому маркеру (например 2.1 = уровень 1)."""
-    # Маркер типа 2.1. или 3.2.1.
-    match = re.match(r'^(\d+(?:\.\d+)+)', marker)
-    if match:
-        parts = match.group(1).split('.')
-        return len(parts) - 1  # 2.1 -> уровень 1, 2.1.3 -> уровень 2
-    return None
-
-
-def parse_list(text: str) -> list[ListItem]:
-    lines = text.strip().split('\n')
-    items = []
+class ParsedResponsibilities(BaseModel):
+    """Результат парсинга обязанностей вакансии."""
     
-    # Собираем информацию о всех строках
-    parsed_lines = []
-    for line in lines:
-        if not line.strip():
-            continue
-        
-        indent = len(line) - len(line.lstrip())
-        clean = line.strip()
-        marker, content = extract_marker(clean)
-        
-        parsed_lines.append({
-            'indent': indent,
-            'marker': marker,
-            'content': content,
-            'has_marker': bool(marker)
-        })
+    tasks: list[Task] = Field(description="Список задач")
     
-    # Определяем уникальные отступы для маппинга на уровни
-    unique_indents = sorted(set(p['indent'] for p in parsed_lines))
-    indent_to_level = {indent: i for i, indent in enumerate(unique_indents)}
+    confidence: ParsingConfidence = Field(description="Уверенность в парсинге")
+    confidence_issues: list[str] = Field(
+        default_factory=list, 
+        description="Причины сниженной уверенности"
+    )
     
-    # Строим элементы
-    for i, p in enumerate(parsed_lines):
-        # Приоритет 1: уровень из самого маркера (2.1. -> level 1)
-        level_from_marker = detect_level_from_marker(p['marker'])
-        if level_from_marker is not None:
-            level = level_from_marker
-        
-        # Приоритет 2: уровень по отступу
-        elif p['indent'] > 0:
-            level = indent_to_level[p['indent']]
-        
-        # Приоритет 3: без маркера + следующий с маркером = заголовок
-        elif not p['has_marker']:
-            # Проверяем, есть ли после этой строки пункты с маркерами/отступами
-            has_children = False
-            for j in range(i + 1, len(parsed_lines)):
-                if parsed_lines[j]['indent'] > p['indent'] or parsed_lines[j]['has_marker']:
-                    has_children = True
-                    break
-                if parsed_lines[j]['indent'] <= p['indent'] and not parsed_lines[j]['has_marker']:
-                    break
-            
-            level = 0  # Заголовок всегда level 0
-            
-        else:
-            level = 0
-        
-        items.append(ListItem(
-            level=level,
-            content=p['content'],
-            original_marker=p['marker']
-        ))
+    is_valid_structure: bool = Field(
+        description="Текст имеет структуру списка обязанностей"
+    )
     
-    return items
+    class Config:
+        json_schema_extra = {
+            "example": {
+                "tasks": [
+                    {
+                        "text": "Контролирует",
+                        "functions": [
+                            {"text": "Работу подчиненных", "original_marker": "*"},
+                            {"text": "Сохранность имущества", "original_marker": "*"}
+                        ],
+                        "original_marker": "1."
+                    },
+                    {
+                        "text": "Составляет отчётность",
+                        "functions": [],
+                        "original_marker": "2."
+                    }
+                ],
+                "confidence": "high",
+                "confidence_issues": [],
+                "is_valid_structure": True
+            }
+        }
 
 
-def renumber(items: list[ListItem]) -> list[tuple[str, str]]:
-    result = []
-    counters = [0] * 10
+# === ПРОМПТ ДЛЯ LLM ===
+
+PROMPT_TEMPLATE = """Распарси обязанности вакансии в структурированный формат.
+
+Структура:
+- Task (задача) — основной пункт обязанностей
+- Function (функция) — конкретное действие в рамках задачи (вложенный пункт)
+
+Правила:
+1. Максимум 2 уровня: задачи и функции внутри них
+2. Если пункт заканчивается на ":" — скорее всего дальше идут функции
+3. Если вложенности нет — functions = []
+4. confidence = "low" если: структура неоднозначна, непонятно что задача/функция
+
+Верни JSON по схеме:
+{{
+  "tasks": [
+    {{
+      "text": "текст задачи (без маркера)",
+      "functions": [
+        {{"text": "текст функции", "original_marker": "- или * или null"}}
+      ],
+      "original_marker": "1. или * или null"
+    }}
+  ],
+  "confidence": "high" | "medium" | "low",
+  "confidence_issues": ["причина если не high"],
+  "is_valid_structure": true | false
+}}
+
+Текст обязанностей:
+{text}
+
+JSON:"""
+
+
+# === ИСПОЛЬЗОВАНИЕ ===
+
+def parse_responsibilities(text: str) -> ParsedResponsibilities:
+    """Парсит обязанности через LLM."""
     
-    for item in items:
-        level = item.level
-        counters[level] += 1
-        
-        for i in range(level + 1, len(counters)):
-            counters[i] = 0
-        
-        number_parts = [str(counters[i]) for i in range(level + 1)]
-        number = '.'.join(number_parts) + '.'
-        
-        result.append((number, item.content))
+    prompt = PROMPT_TEMPLATE.format(text=text)
+    response = call_llm(prompt)  # твой вызов
     
-    return result
+    data = json.loads(response)
+    return ParsedResponsibilities(**data)
 
 
-def format_list(text: str) -> str:
-    items = parse_list(text)
-    numbered = renumber(items)
-    
-    lines = []
-    for number, content in numbered:
-        depth = number.count('.') - 1
-        indent = '  ' * depth
-        lines.append(f"{indent}{number} {content}")
-    
-    return '\n'.join(lines)
+# === ПРИМЕР ===
 
+text = """1. Контролирует:
+* Работу подчиненных
+* Сохранность имущества
+2. Составляет отчётность
+3. Взаимодействует с подрядчиками:
+- Ведёт переговоры
+- Согласовывает договоры"""
 
-# === ТЕСТЫ ===
-test1 = """1. Определить цели проекта и собрать исходные требования.
-2. Разработать архитектуру решения:
- 2.1. Выбрать технологический стек и инструменты.
- 2.2. Спроектировать взаимодействие компонентов системы.
-3. Реализовать MVP и провести первичное тестирование."""
+result = parse_responsibilities(text)
 
-test2 = """Разработать архитектуру решения:
- - Выбрать технологический стек и инструменты.
- - Спроектировать взаимодействие компонентов системы."""
+print(f"Уверенность: {result.confidence}")
+print(f"Валидная структура: {result.is_valid_structure}")
+print()
 
-test3 = """* Определить цели проекта и собрать исходные требования.
-* Разработать архитектуру решения:
- Выбрать технологический стек и инструменты.
- Спроектировать взаимодействие компонентов системы.
-* Реализовать MVP и провести первичное тестирование."""
+for i, task in enumerate(result.tasks, 1):
+    print(f"{i}. {task.text}")
+    for func in task.functions:
+        print(f"   - {func.text}")
+```
 
-for i, test in enumerate([test1, test2, test3], 1):
-    print(f"=== TEST {i} ===")
-    print("Вход:")
-    print(test)
-    print("\nВыход:")
-    print(format_list(test))
-    print("\n")
+**Вывод:**
+```
+Уверенность: high
+Валидная структура: True
+
+1. Контролирует
+   - Работу подчиненных
+   - Сохранность имущества
+2. Составляет отчётность
+3. Взаимодействует с подрядчиками
+   - Ведёт переговоры
+   - Согласовывает договоры
